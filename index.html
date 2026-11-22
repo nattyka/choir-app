@@ -79,6 +79,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:.9rem}
     <button id="clrBtn" disabled>Clear loop</button>
   </div>
   <div class="row">
+    <label style="flex:1;min-width:150px">🎵 Soprano guide <input type="range" id="guide" min="0" max="100" step="5" style="flex:1"></label>
+    <label style="flex:1;min-width:150px">🎧 Recording <input type="range" id="rec" min="0" max="100" step="5" style="flex:1"></label>
     <label style="width:100%"><input type="checkbox" id="count"> 🎵 Starting note + 4-beat count-in when I press Play</label>
     <label style="width:100%"><input type="checkbox" id="car"> 🚗 Car mode: track on speakers (filters it out of the mic, keeps screen awake)</label>
     <label>Part <select id="part"><option value="S">Soprano</option><option value="A">Alto</option><option value="T">Tenor</option><option value="B">Bass</option></select></label>
@@ -116,7 +118,7 @@ const S={files:[],cur:-1,cache:new Map(),ref:null,audio:new Audio(),ctx:null,an:
 S.audio.preload='auto';
 try{S.audio.preservesPitch=true;S.audio.webkitPreservesPitch=true;}catch(e){}
 
-const settings={part:'S',tol:50,oct:false,lat:150,gate:8,speed:1,car:false,auto:false,count:true};
+const settings={part:'S',tol:50,oct:false,lat:150,gate:8,speed:1,car:false,auto:false,count:true,guide:70,rec:100};
 try{Object.assign(settings,JSON.parse(localStorage.getItem('choirSettings')||'{}'));}catch(e){}
 function save(){try{localStorage.setItem('choirSettings',JSON.stringify(settings));}catch(e){}}
 
@@ -202,7 +204,7 @@ function renderTracks(){
 }
 
 async function selectTrack(i){
-  if(S.busy)return;cancelPre();S.busy=true;try{if(S.files[i].url)localStorage.setItem('choirLast',i);}catch(e){}
+  if(S.busy)return;cancelPre();if(S.ctx)guideStop();S.busy=true;try{if(S.files[i].url)localStorage.setItem('choirLast',i);}catch(e){}
   S.audio.pause();S.cur=i;renderTracks();
   const f=S.files[i];
   if(S.audio.src&&S.audio.src.startsWith('blob:'))URL.revokeObjectURL(S.audio.src);
@@ -286,7 +288,7 @@ function bestDev(live,fi){
 const refTime=()=>S.audio.currentTime-settings.lat/1000*S.audio.playbackRate;
 
 function tick(){
-  requestAnimationFrame(tick);
+  requestAnimationFrame(tick);guideTick();
   const live=detectLive();S.live=live;S.dev=null;
   const ref=S.ref,a=S.audio;
   if(ref){
@@ -400,6 +402,31 @@ function drawStrip(){const cv=$('strip'),dpr=window.devicePixelRatio||1,W=Math.r
       const y=H-((n[0]-lo)/(hi-lo))*H;g.fillRect(x(n[1]),y-3*dpr,Math.max(2,x(n[2])-x(n[1])-1),6*dpr);}}
   if(S.loopA!=null||S.loopB!=null){g.fillStyle='rgba(255,211,138,.18)';g.fillRect(x(S.loopA||0),0,x(S.loopB||r.duration)-x(S.loopA||0),H);}
   g.fillStyle='#fff';g.fillRect(x(S.audio.currentTime),0,1.5*dpr,H);}
+// ---- soprano guide line (your notes at the right octave) ----
+S.guide={nodes:[],idx:null};
+function routeAudio(){const c=ensureCtx();if(S.recGain)return;
+  try{const src=c.createMediaElementSource(S.audio);S.recGain=c.createGain();src.connect(S.recGain);S.recGain.connect(c.destination);
+    S.guideBus=c.createGain();S.guideBus.connect(c.destination);applyVolumes();}catch(e){}}
+function applyVolumes(){if(S.recGain)S.recGain.gain.value=settings.rec/100;if(S.guideBus)S.guideBus.gain.value=0.3*settings.guide/100;}
+function guideStop(){const c=S.ctx;for(const n of S.guide.nodes){try{n.g.gain.cancelScheduledValues(0);n.g.gain.setTargetAtTime(0,c.currentTime,0.02);n.o.forEach(o=>o.stop(c.currentTime+0.1));}catch(e){}}
+  S.guide.nodes=[];S.guide.idx=null;}
+function guideVoice(m,t0,t1){const c=S.ctx,f=440*Math.pow(2,(m-69)/12);
+  const g=c.createGain(),lp=c.createBiquadFilter();lp.type='lowpass';lp.frequency.value=2600;
+  const o1=c.createOscillator(),o2=c.createOscillator(),o2g=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
+  o1.type='triangle';o1.frequency.value=f;o2.type='sine';o2.frequency.value=2*f;o2g.gain.value=0.18;
+  lfo.frequency.value=5.3;lg.gain.setValueAtTime(0,t0);lg.gain.linearRampToValueAtTime(f*0.006,t0+0.35);
+  lfo.connect(lg);lg.connect(o1.frequency);
+  o1.connect(g);o2.connect(o2g);o2g.connect(g);g.connect(lp);lp.connect(S.guideBus);
+  g.gain.setValueAtTime(0,t0);g.gain.linearRampToValueAtTime(1,t0+0.05);g.gain.setValueAtTime(1,Math.max(t0+0.06,t1-0.05));g.gain.linearRampToValueAtTime(0,t1+0.04);
+  const os=[o1,o2,lfo];os.forEach(o=>{o.start(t0);o.stop(t1+0.1);});S.guide.nodes.push({g,o:os,end:t1+0.1});}
+function guideTick(){const a=S.audio,r=S.ref;
+  if(!r||!r.notes||!S.guideBus||settings.guide<=0||a.paused||!S.ctx){return;}
+  const rate=a.playbackRate,now=S.ctx.currentTime,mt=a.currentTime;
+  if(S.guide.idx==null){S.guide.idx=r.notes.findIndex(n=>n[2]-0.05>mt);if(S.guide.idx<0)S.guide.idx=r.notes.length;}
+  while(S.guide.idx<r.notes.length){const [m,s,e]=r.notes[S.guide.idx];if(s>mt+0.35)break;
+    const t0=now+Math.max(0,(s-mt)/rate),t1=now+(e-0.04-mt)/rate;if(t1>t0+0.04)guideVoice(m,t0,t1);S.guide.idx++;}
+  S.guide.nodes=S.guide.nodes.filter(n=>n.end>now);}
+S.audio.addEventListener('seeking',guideStop);S.audio.addEventListener('pause',guideStop);
 // ---- starting note + count-in ----
 let pre=null;
 function beep(t,f,dur,vol,type){const c=S.ctx,o=c.createOscillator(),g=c.createGain();o.type=type;o.frequency.value=f;
@@ -407,7 +434,7 @@ function beep(t,f,dur,vol,type){const c=S.ctx,o=c.createOscillator(),g=c.createG
   o.connect(g);g.connect(c.destination);o.start(t);o.stop(t+dur+0.05);}
 function cancelPre(){if(pre){clearTimeout(pre.timer);pre=null;}}
 async function playWithCount(){
-  const a=S.audio,song=S.song,ctx=ensureCtx();await ctx.resume();
+  const a=S.audio,song=S.song,ctx=ensureCtx();routeAudio();await ctx.resume();
   const from=a.currentTime,nn=S.ref.notes.find(n=>n[1]>=from-0.05);
   if(!nn){return a.play();}
   // unlock the audio element inside the tap (needed on iPhone), then wait
@@ -434,6 +461,7 @@ $('files').onchange=e=>{
 };
 $('micBtn').onclick=startMic;
 async function togglePlay(){
+  routeAudio();if(S.ctx)S.ctx.resume();
   if(!S.ref)return;
   if(pre){cancelPre();setControls();return;}
   if(S.audio.paused){if(!S.an)status('Tip: start the mic to get scored.');keepAwake();
@@ -461,6 +489,8 @@ bind('tol','tol',Number);
 bind('car','car',v=>v,()=>{if(S.an){$('micBtn').disabled=false;startMic();}if(settings.car)keepAwake();else if(wakeLock){wakeLock.release();}});
 bind('oct','oct',v=>v);
 bind('count','count',v=>v);
+bind('guide','guide',Number,()=>{applyVolumes();if(settings.guide<=0&&S.ctx)guideStop();});
+bind('rec','rec',Number,applyVolumes);
 bind('auto','auto',v=>v,()=>{if(S.cur>=0)selectTrack(S.cur);});
 bind('speed','speed',Number,()=>{S.audio.playbackRate=settings.speed;});
 bind('lat','lat',Number,()=>$('latV').textContent=settings.lat+' ms');
