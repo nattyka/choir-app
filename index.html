@@ -85,7 +85,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:.9rem}
     <label style="flex:1;min-width:150px">🎵 Soprano guide <input type="range" id="guide" min="0" max="100" step="5" style="flex:1"></label>
     <label style="flex:1;min-width:150px">🎧 Recording <input type="range" id="rec" min="0" max="100" step="5" style="flex:1"></label>
     <label style="width:100%"><input type="checkbox" id="count"> 🎵 Starting note + 4-beat count-in when I press Play</label>
-    <label style="width:100%"><input type="checkbox" id="car"> 🚗 Car mode: track on speakers (filters it out of the mic, keeps screen awake)</label>
+    <label style="width:100%"><input type="checkbox" id="car"> 🔈 No headphones (phone speaker or car): filters the music out of the mic and keeps the screen awake. Turn off only for wired headphones.</label>
     <label>Part <select id="part"><option value="S">Soprano</option><option value="A">Alto</option><option value="T">Tenor</option><option value="B">Bass</option></select></label>
     <label>Speed <select id="speed"><option>0.6</option><option>0.75</option><option>0.9</option><option selected>1</option></select></label>
     <label>Strictness <select id="tol"><option value="25">Strict (±25¢)</option><option value="35">Firm (±35¢)</option><option value="50" selected>Normal (±50¢)</option><option value="75">Easy (±75¢)</option></select></label>
@@ -123,8 +123,8 @@ const S={files:[],cur:-1,cache:new Map(),ref:null,audio:new Audio(),ctx:null,an:
 S.audio.preload='auto';
 try{S.audio.preservesPitch=true;S.audio.webkitPreservesPitch=true;}catch(e){}
 
-const settings={part:'S',tol:50,oct:false,lat:150,gate:3,speed:1,car:false,auto:false,count:true,guide:70,rec:100};
-try{Object.assign(settings,JSON.parse(localStorage.getItem('choirSettings')||'{}'));if(!settings.v2){settings.gate=3;settings.v2=true;}}catch(e){}
+const settings={part:'S',tol:50,oct:false,lat:150,gate:3,speed:1,car:true,auto:false,count:true,guide:70,rec:100};
+try{Object.assign(settings,JSON.parse(localStorage.getItem('choirSettings')||'{}'));if(!settings.v2){settings.gate=3;settings.v2=true;}if(!settings.v3){settings.car=true;settings.v3=true;}}catch(e){}
 function save(){try{localStorage.setItem('choirSettings',JSON.stringify(settings));}catch(e){}}
 
 const midiOf=f=>69+12*Math.log2(f/440);
@@ -266,6 +266,10 @@ async function startMic(){
 if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener)
   navigator.mediaDevices.addEventListener('devicechange',()=>{if(S.an){clearTimeout(S._dc);S._dc=setTimeout(()=>{status('Headphones or mic changed: switched to the new mic.');startMic();},600);}});
 
+function targetNear(){const r=S.ref;if(!r||!r.notes||S.audio.paused)return null;
+  const fi=Math.round(refTime()/r.fd),w=Math.round(0.6/r.fd);let best=null,bd=1e9;
+  for(let k=Math.max(0,fi-w);k<=Math.min(r.n-1,fi+w);k++){const m=r.midi[k];if(!isNaN(m)&&Math.abs(k-fi)<bd){bd=Math.abs(k-fi);best=m;}}
+  return best;}
 function detectLive(){
   if(!S.an)return null;
   const x=S.micBuf;S.an.getFloatTimeDomainData(x);
@@ -275,11 +279,20 @@ function detectLive(){
   $('gateMark').style.left=(Math.min(1,Math.sqrt(settings.gate/1000/0.08))*100)+'%';
   let m=null;
   if(r>settings.gate/1000){
-    const sr=S.ctx.sampleRate,[fmin,fmax]=PARTS[settings.part];
+    const sr=S.ctx.sampleRate;let [fmin,fmax]=PARTS[settings.part],thr=0.2;
+    // while a scored song plays, only listen around the note you should be singing:
+    // ignores the recording's low voice and piano bass coming through a speaker
+    const tg=targetNear();
+    if(tg!=null){fmin=440*Math.pow(2,(tg-9-69)/12);fmax=440*Math.pow(2,(tg+9-69)/12);thr=0.3;}
     const tMin=Math.floor(sr/fmax),tMax=Math.ceil(sr/fmin),W=Math.min(1024,x.length-tMax-2);
-    const f=yin(x,0,W,tMin,tMax,sr,0.2,S.micD);
-    if(f&&f>=fmin*0.85&&f<=fmax*1.15)m=midiOf(f);
+    const f=yin(x,0,W,tMin,tMax,sr,thr,S.micD);
+    if(f&&f>=fmin*0.97&&f<=fmax*1.03)m=midiOf(f);
   }
+  // tell the singer when we hear sound but can't find a note in it
+  const now=performance.now();
+  if(r>settings.gate/1000&&m==null&&!S.audio.paused){if(!S.noPitch)S.noPitch=now;}else S.noPitch=0;
+  const hint=S.noPitch&&now-S.noPitch>1500;
+  if(hint!==S._hint){S._hint=hint;$('micName').textContent=hint?(settings.car?'hearing sound, no clear note: sing louder or closer':'hearing music, not you: turn on 🔈 No headphones'):((S.stream&&S.stream.getAudioTracks()[0]&&S.stream.getAudioTracks()[0].label)||'mic on');$('micName').style.color=hint?'#ffd38a':'';}
   S.hist.push(m);if(S.hist.length>3)S.hist.shift();
   const v=S.hist.filter(q=>q!=null);
   if(v.length<2||m==null)return null;
