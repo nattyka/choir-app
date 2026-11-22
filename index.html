@@ -59,6 +59,9 @@ details summary{cursor:pointer;color:var(--muted);font-size:.9rem}
     <div><div class="big" id="now">–</div><div class="small" id="nowSub">target · you</div></div>
     <div><div class="small" id="passes"></div></div>
   </div>
+  <div class="row" style="margin-top:8px;gap:6px;flex-wrap:nowrap"><span class="small">🎤</span>
+    <div style="flex:1;height:8px;background:#252a35;border-radius:4px;position:relative;overflow:hidden"><div id="meter" style="height:100%;width:0;background:#8a8f99"></div><div id="gateMark" style="position:absolute;top:0;bottom:0;width:2px;background:#ffd38a"></div></div>
+    <span class="small" id="micName" style="max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">mic off</span></div>
 </div>
 
 <canvas id="cv"></canvas>
@@ -93,7 +96,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:.9rem}
     <div class="row"><label><input type="checkbox" id="oct"> Count right note in wrong octave as on</label></div>
     <div class="row"><label style="flex:1">Latency <input type="range" id="lat" min="0" max="500" step="10" value="150"><span id="latV">150 ms</span></label></div>
     <div class="small">If your dots sit to the right of the blue bars when you're singing in time, increase latency. Bluetooth headphones often need 250+ ms.</div>
-    <div class="row"><label style="flex:1">Mic gate <input type="range" id="gate" min="1" max="40" step="1" value="8"><span id="gateV">8</span></label></div>
+    <div class="row"><label style="flex:1">Mic gate <input type="range" id="gate" min="1" max="40" step="1" value="3"><span id="gateV">3</span></label></div>
     <div class="small">Raise it if room noise shows up as dots. Lower it if quiet singing isn't picked up.</div>
   </details>
 </div>
@@ -118,8 +121,8 @@ const S={files:[],cur:-1,cache:new Map(),ref:null,audio:new Audio(),ctx:null,an:
 S.audio.preload='auto';
 try{S.audio.preservesPitch=true;S.audio.webkitPreservesPitch=true;}catch(e){}
 
-const settings={part:'S',tol:50,oct:false,lat:150,gate:8,speed:1,car:false,auto:false,count:true,guide:70,rec:100};
-try{Object.assign(settings,JSON.parse(localStorage.getItem('choirSettings')||'{}'));}catch(e){}
+const settings={part:'S',tol:50,oct:false,lat:150,gate:3,speed:1,car:false,auto:false,count:true,guide:70,rec:100};
+try{Object.assign(settings,JSON.parse(localStorage.getItem('choirSettings')||'{}'));if(!settings.v2){settings.gate=3;settings.v2=true;}}catch(e){}
 function save(){try{localStorage.setItem('choirSettings',JSON.stringify(settings));}catch(e){}}
 
 const midiOf=f=>69+12*Math.log2(f/440);
@@ -246,21 +249,28 @@ async function startMic(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){status('Microphone not available. The page must be opened over https.');return;}
   try{
     const ctx=ensureCtx();await ctx.resume();
-    if(S.stream)S.stream.getTracks().forEach(t=>t.stop());
+    if(S.stream)S.stream.getTracks().forEach(t=>{t.onended=null;t.stop();});if(S.micSrc)try{S.micSrc.disconnect();}catch(e){}
     const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:!!settings.car,noiseSuppression:false,autoGainControl:false}});S.stream=stream;
-    const src=ctx.createMediaStreamSource(stream);const an=ctx.createAnalyser();an.fftSize=2048;
+    const tr=stream.getAudioTracks()[0];$('micName').textContent=(tr&&tr.label)||'mic on';
+    if(tr)tr.onended=()=>{status('Microphone changed, reconnecting…');setTimeout(startMic,300);};
+    const src=ctx.createMediaStreamSource(stream);S.micSrc=src;const an=ctx.createAnalyser();an.fftSize=2048;
     const mute=ctx.createGain();mute.gain.value=0;src.connect(an);an.connect(mute);mute.connect(ctx.destination);
     S.an=an;S.micBuf=new Float32Array(2048);S.micD=new Float32Array(4096);
     $('micBtn').textContent=settings.car?'🎤 Mic on (car)':'🎤 Mic on';$('micBtn').className='on';$('micBtn').disabled=true;
     if(!S.ref)status('Mic on. Now load a track.');
   }catch(e){status('Mic permission was refused or failed: '+(e&&e.message||e));}
+  S.micStarting=false;
 }
+if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener)
+  navigator.mediaDevices.addEventListener('devicechange',()=>{if(S.an){clearTimeout(S._dc);S._dc=setTimeout(()=>{status('Headphones or mic changed: switched to the new mic.');startMic();},600);}});
 
 function detectLive(){
   if(!S.an)return null;
   const x=S.micBuf;S.an.getFloatTimeDomainData(x);
   let s=0;for(let i=0;i<x.length;i++)s+=x[i]*x[i];
-  const r=Math.sqrt(s/x.length);
+  const r=Math.sqrt(s/x.length);S.micLevel=r;
+  const lv=Math.min(1,Math.sqrt(r/0.08));$('meter').style.width=(lv*100)+'%';$('meter').style.background=r>settings.gate/1000?'#3ddc84':'#8a8f99';
+  $('gateMark').style.left=(Math.min(1,Math.sqrt(settings.gate/1000/0.08))*100)+'%';
   let m=null;
   if(r>settings.gate/1000){
     const sr=S.ctx.sampleRate,[fmin,fmax]=PARTS[settings.part];
@@ -462,9 +472,10 @@ $('files').onchange=e=>{
 $('micBtn').onclick=startMic;
 async function togglePlay(){
   routeAudio();if(S.ctx)S.ctx.resume();
+  if(!S.an&&!S.micStarting&&S.audio.paused&&!pre){S.micStarting=true;startMic();}
   if(!S.ref)return;
   if(pre){cancelPre();setControls();return;}
-  if(S.audio.paused){if(!S.an)status('Tip: start the mic to get scored.');keepAwake();
+  if(S.audio.paused){keepAwake();
     if(settings.count&&S.song&&S.ref&&S.ref.notes){await playWithCount();setControls();return;}
     try{await S.audio.play();}catch(e){status('Playback blocked: '+e.message);}}
   else S.audio.pause();
